@@ -118,9 +118,11 @@ class ChannelControl:
         if not self.psu:
             return
         try:
-            self.voltage_set[self.channel_num - 1].set(self.voltage_set[self.channel_num - 1].get())
-            # Use channel-specific SCPI command directly
-            self.psu.write(f"APP:VOLT {self.voltage_set[0].get():.3f}, {self.voltage_set[1].get():.3f}, {self.voltage_set[2].get():.3f}")
+            # Select the channel first
+            self.psu.write(f"INSTrument:NSELect {self.channel_num}")
+            # Then set the voltage for the selected channel
+            voltage = self.voltage_set[self.channel_num - 1].get()
+            self.psu.write(f"VOLTage {voltage:.3f}")
         except Exception as e:
             print(f"Channel {self.channel_num} voltage error: {e}")
             
@@ -129,22 +131,24 @@ class ChannelControl:
         if not self.psu:
             return
         try:
-            self.current_set[self.channel_num - 1].set(self.current_set[self.channel_num - 1].get())
-            # Use channel-specific SCPI command directly
-            self.psu.write(f"APP:CURR {self.current_set[0].get():.3f}, {self.current_set[1].get():.3f}, {self.current_set[2].get():.3f}")
+            # Select the channel first
+            self.psu.write(f"INSTrument:NSELect {self.channel_num}")
+            # Then set the current for the selected channel
+            current = self.current_set[self.channel_num - 1].get()
+            self.psu.write(f"CURRent {current:.3f}")
         except Exception as e:
             print(f"Channel {self.channel_num} current error: {e}")
             
     def adjust_voltage(self, delta):
         """Adjust voltage by delta."""
-        new_voltage = max(0, self.voltage_set.get() + delta)
-        self.voltage_set.set(new_voltage)
+        new_voltage = max(0, self.voltage_set[self.channel_num - 1].get() + delta)
+        self.voltage_set[self.channel_num - 1].set(new_voltage)
         self.set_voltage()
         
     def adjust_current(self, delta):
         """Adjust current by delta."""
-        new_current = max(0, self.current_set.get() + delta)
-        self.current_set.set(new_current)
+        new_current = max(0, self.current_set[self.channel_num - 1].get() + delta)
+        self.current_set[self.channel_num - 1].set(new_current)
         self.set_current()
         
     def toggle_output(self):
@@ -152,9 +156,11 @@ class ChannelControl:
         if not self.psu:
             return
         try:
-            # Use channel-specific SCPI command directly
-            state = 1 if self.output_enabled.get() else 0
-            self.psu.write(f"APP:OUTP {state},{self.channel_num}")
+            # Select the channel first
+            self.psu.write(f"INSTrument:NSELect {self.channel_num}")
+            # Then set the output for the selected channel
+            command = "OUTPut ON" if self.output_enabled.get() else "OUTPut OFF"
+            self.psu.write(command)
         except Exception as e:
             print(f"Channel {self.channel_num} output error: {e}")
             
@@ -446,15 +452,17 @@ class OwonPSUGUI:
             # Update all channel controls with PSU instance
             for channel in self.channels:
                 channel.set_psu(self.psu)
-                # Update channel values with channel-specific commands
+                # Update channel values with channel selection
                 try:
-                    # Use channel-specific query commands
-                    voltage = float(self.psu.query(f"APP:VOLT? {channel.channel_num}"))
-                    current = float(self.psu.query(f"APP:CURR? {channel.channel_num}"))
-                    output = self.psu.query(f"APP:OUTP? {channel.channel_num}") == "1"
+                    # Select the channel first
+                    self.psu.write(f"INSTrument:NSELect {channel.channel_num}")
+                    # Then read values for the selected channel
+                    voltage = float(self.psu.query("VOLTage?"))
+                    current = float(self.psu.query("CURRent?"))
+                    output = self.psu.query("OUTPut?") in ["1", "ON"]
                     
-                    channel.voltage_set.set(voltage)
-                    channel.current_set.set(current)
+                    channel.voltage_set[channel.channel_num - 1].set(voltage)
+                    channel.current_set[channel.channel_num - 1].set(current)
                     channel.output_enabled.set(output)
                 except:
                     pass  # Handle case where channel-specific commands aren't available
@@ -504,13 +512,15 @@ class OwonPSUGUI:
                 time.sleep(0.5)
                 for channel in self.channels:
                     try:
-                        # Use channel-specific query commands
-                        voltage = float(self.psu.query(f"APP:VOLT? {channel.channel_num}"))
-                        current = float(self.psu.query(f"APP:CURR? {channel.channel_num}"))
-                        output = self.psu.query(f"APP:OUTP? {channel.channel_num}") == "1"
+                        # Select the channel first
+                        self.psu.write(f"INSTrument:NSELect {channel.channel_num}")
+                        # Then read values for the selected channel
+                        voltage = float(self.psu.query("VOLTage?"))
+                        current = float(self.psu.query("CURRent?"))
+                        output = self.psu.query("OUTPut?") in ["1", "ON"]
                         
-                        channel.voltage_set.set(voltage)
-                        channel.current_set.set(current)
+                        channel.voltage_set[channel.channel_num - 1].set(voltage)
+                        channel.current_set[channel.channel_num - 1].set(current)
                         channel.output_enabled.set(output)
                     except:
                         pass
@@ -586,13 +596,11 @@ class OwonPSUGUI:
                 voltage = float(voltage_text)
                 voltages = [voltage, voltage, voltage]
             
-            # Send bulk voltage command
-            voltage_cmd = f"APP:VOLT {voltages[0]:.3f},{voltages[1]:.3f},{voltages[2]:.3f}"
-            self.psu.write(voltage_cmd)
-            
-            # Update GUI values
+            # Set voltage for each channel individually using channel selection
             for i, channel in enumerate(self.channels):
-                channel.voltage_set.set(voltages[i])
+                self.psu.write(f"INSTrument:NSELect {channel.channel_num}")
+                self.psu.write(f"VOLTage {voltages[i]:.3f}")
+                channel.voltage_set[channel.channel_num - 1].set(voltages[i])
             
             self.log_message(f"Set all voltages: CH1={voltages[0]}V, CH2={voltages[1]}V, CH3={voltages[2]}V")
             
@@ -625,13 +633,11 @@ class OwonPSUGUI:
                 current = float(current_text)
                 currents = [current, current, current]
             
-            # Send bulk current command
-            current_cmd = f"APP:CURR {currents[0]:.3f},{currents[1]:.3f},{currents[2]:.3f}"
-            self.psu.write(current_cmd)
-            
-            # Update GUI values
+            # Set current for each channel individually using channel selection
             for i, channel in enumerate(self.channels):
-                channel.current_set.set(currents[i])
+                self.psu.write(f"INSTrument:NSELect {channel.channel_num}")
+                self.psu.write(f"CURRent {currents[i]:.3f}")
+                channel.current_set[channel.channel_num - 1].set(currents[i])
             
             self.log_message(f"Set all currents: CH1={currents[0]}A, CH2={currents[1]}A, CH3={currents[2]}A")
             
@@ -657,19 +663,21 @@ class OwonPSUGUI:
                     channel_statuses = []
                     for channel in self.channels:
                         try:
-                            # Use channel-specific measurement commands
-                            voltage = float(self.psu.query(f"APP:MEAS:VOLT? {channel.channel_num}"))
-                            current = float(self.psu.query(f"APP:MEAS:CURR? {channel.channel_num}"))
-                            power = float(self.psu.query(f"APP:MEAS:POW? {channel.channel_num}"))
-                            output = self.psu.query(f"APP:OUTP? {channel.channel_num}") == "1"
+                            # Select the channel first
+                            self.psu.write(f"INSTrument:NSELect {channel.channel_num}")
+                            # Then read measurements for the selected channel
+                            voltage = float(self.psu.query("MEASure:VOLTage?"))
+                            current = float(self.psu.query("MEASure:CURRent?"))
+                            power = float(self.psu.query("MEASure:POWer?"))
+                            output = self.psu.query("OUTPut?") in ["1", "ON"]
                             
                             status = {
                                 'voltage': voltage,
                                 'current': current,
                                 'power': power,
                                 'output_enabled': output,
-                                'set_voltage': channel.voltage_set.get(),
-                                'set_current': channel.current_set.get()
+                                'set_voltage': channel.voltage_set[channel.channel_num - 1].get(),
+                                'set_current': channel.current_set[channel.channel_num - 1].get()
                             }
                             channel_statuses.append((channel.channel_num, status))
                         except:
