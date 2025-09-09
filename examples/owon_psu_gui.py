@@ -21,15 +21,16 @@ from owon_psu import OwonPSU, OwonPSUError
 class ChannelControl:
     """Control class for individual PSU channel."""
     
-    def __init__(self, channel_num, psu_instance=None):
+    def __init__(self, channel_num, psu_instance=None, gui_instance=None):
         """Initialize channel control."""
         self.channel_num = channel_num
         self.psu = psu_instance
+        self.gui = gui_instance
         self.frame = None
         
         # Channel variables
-        self.voltage_set = [tk.DoubleVar(value=12.0) for _ in range(3)]
-        self.current_set = [tk.DoubleVar(value=1.0) for _ in range(3)]
+        self.voltage_set = tk.DoubleVar(value=12.0)
+        self.current_set = tk.DoubleVar(value=1.0)
         self.output_enabled = tk.BooleanVar(value=False)
         
         # Status variables
@@ -50,7 +51,7 @@ class ChannelControl:
         voltage_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 5))
         
         ttk.Label(voltage_frame, text="Set Voltage (V):").grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
-        voltage_entry = ttk.Entry(voltage_frame, textvariable=self.voltage_set[self.channel_num - 1], width=15)
+        voltage_entry = ttk.Entry(voltage_frame, textvariable=self.voltage_set, width=15)
         voltage_entry.grid(row=1, column=0, pady=(0, 10))
         
         ttk.Button(voltage_frame, text="Set Voltage", command=self.set_voltage).grid(row=2, column=0, pady=(0, 10))
@@ -69,7 +70,7 @@ class ChannelControl:
         current_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(5, 0))
         
         ttk.Label(current_frame, text="Set Current (A):").grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
-        current_entry = ttk.Entry(current_frame, textvariable=self.current_set[self.channel_num - 1], width=15)
+        current_entry = ttk.Entry(current_frame, textvariable=self.current_set, width=15)
         current_entry.grid(row=1, column=0, pady=(0, 10))
         
         ttk.Button(current_frame, text="Set Current", command=self.set_current).grid(row=2, column=0, pady=(0, 10))
@@ -109,9 +110,11 @@ class ChannelControl:
         ttk.Label(measurements_frame, text="Measured Power:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=(5, 0))
         ttk.Label(measurements_frame, textvariable=self.power_measured, font=("Arial", 10, "bold")).grid(row=1, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
         
-    def set_psu(self, psu_instance):
+    def set_psu(self, psu_instance, gui_instance=None):
         """Set the PSU instance for this channel."""
         self.psu = psu_instance
+        if gui_instance:
+            self.gui = gui_instance
         
     def set_voltage(self):
         """Set voltage for this channel."""
@@ -121,7 +124,7 @@ class ChannelControl:
             # Select the channel first
             self.psu.write(f"INSTrument:NSELect {self.channel_num}")
             # Then set the voltage for the selected channel
-            voltage = self.voltage_set[self.channel_num - 1].get()
+            voltage = self.voltage_set.get()
             self.psu.write(f"VOLTage {voltage:.3f}")
         except Exception as e:
             print(f"Channel {self.channel_num} voltage error: {e}")
@@ -134,33 +137,41 @@ class ChannelControl:
             # Select the channel first
             self.psu.write(f"INSTrument:NSELect {self.channel_num}")
             # Then set the current for the selected channel
-            current = self.current_set[self.channel_num - 1].get()
+            current = self.current_set.get()
             self.psu.write(f"CURRent {current:.3f}")
         except Exception as e:
             print(f"Channel {self.channel_num} current error: {e}")
             
     def adjust_voltage(self, delta):
         """Adjust voltage by delta."""
-        new_voltage = max(0, self.voltage_set[self.channel_num - 1].get() + delta)
-        self.voltage_set[self.channel_num - 1].set(new_voltage)
+        new_voltage = max(0, self.voltage_set.get() + delta)
+        self.voltage_set.set(new_voltage)
         self.set_voltage()
         
     def adjust_current(self, delta):
         """Adjust current by delta."""
-        new_current = max(0, self.current_set[self.channel_num - 1].get() + delta)
-        self.current_set[self.channel_num - 1].set(new_current)
+        new_current = max(0, self.current_set.get() + delta)
+        self.current_set.set(new_current)
         self.set_current()
         
     def toggle_output(self):
-        """Toggle output on/off."""
-        if not self.psu:
+        """Toggle output on/off for this specific channel."""
+        if not self.psu or not self.gui:
             return
         try:
-            # Select the channel first
-            self.psu.write(f"INSTrument:NSELect {self.channel_num}")
-            # Then set the output for the selected channel
-            command = "OUTPut ON" if self.output_enabled.get() else "OUTPut OFF"
+            # Get current output states for all channels
+            output_states = []
+            for i, channel in enumerate(self.gui.channels):
+                if i == self.channel_num - 1:  # This channel
+                    output_states.append(1 if self.output_enabled.get() else 0)
+                else:  # Other channels - keep their current state
+                    output_states.append(1 if channel.output_enabled.get() else 0)
+            
+            # Send command to set all channel outputs at once
+            # Format: CHAN:OUTP:ALL <ch1>,<ch2>,<ch3>
+            command = f"CHAN:OUTP:ALL {output_states[0]},{output_states[1]},{output_states[2]}"
             self.psu.write(command)
+            
         except Exception as e:
             print(f"Channel {self.channel_num} output error: {e}")
             
@@ -205,7 +216,7 @@ class OwonPSUGUI:
         # Channel controls
         self.channels = []
         for i in range(1, 4):  # Channels 1, 2, 3
-            self.channels.append(ChannelControl(i))
+            self.channels.append(ChannelControl(i, None, self))
         
         # GUI variables
         self.setup_variables()
@@ -451,7 +462,7 @@ class OwonPSUGUI:
             
             # Update all channel controls with PSU instance
             for channel in self.channels:
-                channel.set_psu(self.psu)
+                channel.set_psu(self.psu, self)
                 # Update channel values with channel selection
                 try:
                     # Select the channel first
@@ -461,8 +472,8 @@ class OwonPSUGUI:
                     current = float(self.psu.query("CURRent?"))
                     output = self.psu.query("OUTPut?") in ["1", "ON"]
                     
-                    channel.voltage_set[channel.channel_num - 1].set(voltage)
-                    channel.current_set[channel.channel_num - 1].set(current)
+                    channel.voltage_set.set(voltage)
+                    channel.current_set.set(current)
                     channel.output_enabled.set(output)
                 except:
                     pass  # Handle case where channel-specific commands aren't available
@@ -519,8 +530,8 @@ class OwonPSUGUI:
                         current = float(self.psu.query("CURRent?"))
                         output = self.psu.query("OUTPut?") in ["1", "ON"]
                         
-                        channel.voltage_set[channel.channel_num - 1].set(voltage)
-                        channel.current_set[channel.channel_num - 1].set(current)
+                        channel.voltage_set.set(voltage)
+                        channel.current_set.set(current)
                         channel.output_enabled.set(output)
                     except:
                         pass
@@ -535,9 +546,15 @@ class OwonPSUGUI:
             return
             
         try:
-            # Safe shutdown each channel individually
+            # Set all voltages to 0 and disable all outputs
+            self.psu.write("APP:VOLT 0.0,0.0,0.0")
+            self.psu.write("CHAN:OUTP:ALL 0,0,0")
+            
+            # Update UI
             for channel in self.channels:
-                channel.safe_shutdown()
+                channel.output_enabled.set(False)
+                channel.voltage_set.set(0.0)
+            
             self.log_message("Safe shutdown completed for all channels")
         except Exception as e:
             self.log_message(f"Safe shutdown failed: {e}")
@@ -550,9 +567,12 @@ class OwonPSUGUI:
             return
             
         try:
+            # Set all channels to enabled
             for channel in self.channels:
                 channel.output_enabled.set(True)
-                channel.toggle_output()
+            
+            # Send single command to enable all outputs
+            self.psu.write("CHAN:OUTP:ALL 1,1,1")
             self.log_message("All outputs enabled")
         except Exception as e:
             self.log_message(f"Failed to enable all outputs: {e}")
@@ -565,9 +585,12 @@ class OwonPSUGUI:
             return
             
         try:
+            # Set all channels to disabled
             for channel in self.channels:
                 channel.output_enabled.set(False)
-                channel.toggle_output()
+            
+            # Send single command to disable all outputs
+            self.psu.write("CHAN:OUTP:ALL 0,0,0")
             self.log_message("All outputs disabled")
         except Exception as e:
             self.log_message(f"Failed to disable all outputs: {e}")
@@ -600,7 +623,7 @@ class OwonPSUGUI:
             for i, channel in enumerate(self.channels):
                 self.psu.write(f"INSTrument:NSELect {channel.channel_num}")
                 self.psu.write(f"VOLTage {voltages[i]:.3f}")
-                channel.voltage_set[channel.channel_num - 1].set(voltages[i])
+                channel.voltage_set.set(voltages[i])
             
             self.log_message(f"Set all voltages: CH1={voltages[0]}V, CH2={voltages[1]}V, CH3={voltages[2]}V")
             
@@ -637,7 +660,7 @@ class OwonPSUGUI:
             for i, channel in enumerate(self.channels):
                 self.psu.write(f"INSTrument:NSELect {channel.channel_num}")
                 self.psu.write(f"CURRent {currents[i]:.3f}")
-                channel.current_set[channel.channel_num - 1].set(currents[i])
+                channel.current_set.set(currents[i])
             
             self.log_message(f"Set all currents: CH1={currents[0]}A, CH2={currents[1]}A, CH3={currents[2]}A")
             
@@ -661,6 +684,14 @@ class OwonPSUGUI:
                 try:
                     # Get status for each channel separately
                     channel_statuses = []
+                    
+                    # Get output states for all channels at once
+                    try:
+                        output_states = self.psu.query("CHAN:OUTP:ALL?").strip().split(',')
+                        output_states = [state.strip() in ["1", "ON"] for state in output_states]
+                    except:
+                        output_states = [False, False, False]
+                    
                     for channel in self.channels:
                         try:
                             # Select the channel first
@@ -669,15 +700,17 @@ class OwonPSUGUI:
                             voltage = float(self.psu.query("MEASure:VOLTage?"))
                             current = float(self.psu.query("MEASure:CURRent?"))
                             power = float(self.psu.query("MEASure:POWer?"))
-                            output = self.psu.query("OUTPut?") in ["1", "ON"]
+                            
+                            # Use the output state from the bulk query
+                            output = output_states[channel.channel_num - 1] if channel.channel_num <= len(output_states) else False
                             
                             status = {
                                 'voltage': voltage,
                                 'current': current,
                                 'power': power,
                                 'output_enabled': output,
-                                'set_voltage': channel.voltage_set[channel.channel_num - 1].get(),
-                                'set_current': channel.current_set[channel.channel_num - 1].get()
+                                'set_voltage': channel.voltage_set.get(),
+                                'set_current': channel.current_set.get()
                             }
                             channel_statuses.append((channel.channel_num, status))
                         except:
