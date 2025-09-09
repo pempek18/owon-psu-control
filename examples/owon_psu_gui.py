@@ -18,6 +18,162 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 
 from owon_psu import OwonPSU, OwonPSUError
 
+# Battery charging profiles
+BATTERY_TYPES = {
+    "18650 Li-ion": {
+        "max_voltage": 4.2,
+        "nominal_voltage": 3.7,
+        "max_current": 1.0,
+        "charge_current": 0.5,
+        "cutoff_current": 0.05,
+        "description": "Standard 18650 lithium-ion battery"
+    },
+    "Car Battery (Lead-Acid)": {
+        "max_voltage": 14.4,
+        "nominal_voltage": 12.6,
+        "max_current": 10.0,
+        "charge_current": 2.0,
+        "cutoff_current": 0.1,
+        "description": "12V automotive lead-acid battery"
+    },
+    "AGM Battery": {
+        "max_voltage": 14.7,
+        "nominal_voltage": 12.8,
+        "max_current": 5.0,
+        "charge_current": 1.0,
+        "cutoff_current": 0.05,
+        "description": "Absorbed Glass Mat battery"
+    },
+    "Gel Battery": {
+        "max_voltage": 14.1,
+        "nominal_voltage": 12.8,
+        "max_current": 3.0,
+        "charge_current": 0.5,
+        "cutoff_current": 0.05,
+        "description": "Gel cell battery"
+    }
+}
+
+class BatteryCharger:
+    """Battery charging control class."""
+    
+    def __init__(self, gui_instance):
+        self.gui = gui_instance
+        self.charging = False
+        self.charge_start_time = None
+        self.battery_type = None
+        self.target_voltage = 0.0
+        self.target_current = 0.0
+        self.cutoff_current = 0.0
+        self.charge_channel = 1  # Default to channel 1
+        
+    def start_charging(self, battery_type, channel_num=1):
+        """Start charging a battery."""
+        if not self.gui.connected or not self.gui.psu:
+            return False
+            
+        if battery_type not in BATTERY_TYPES:
+            return False
+            
+        self.battery_type = battery_type
+        self.charge_channel = channel_num
+        profile = BATTERY_TYPES[battery_type]
+        
+        self.target_voltage = profile["max_voltage"]
+        self.target_current = profile["charge_current"]
+        self.cutoff_current = profile["cutoff_current"]
+        
+        try:
+            # Select the channel
+            self.gui.psu.write(f"INSTrument:NSELect {channel_num}")
+            
+            # Set voltage and current limits
+            self.gui.psu.write(f"VOLTage {self.target_voltage:.3f}")
+            self.gui.psu.write(f"CURRent {self.target_current:.3f}")
+            
+            # Enable output
+            self.gui.psu.write("OUTPut ON")
+            
+            self.charging = True
+            self.charge_start_time = time.time()
+            
+            # Update channel UI
+            channel = self.gui.channels[channel_num - 1]
+            channel.voltage_set.set(self.target_voltage)
+            channel.current_set.set(self.target_current)
+            channel.output_enabled.set(True)
+            
+            self.gui.log_message(f"Started charging {battery_type} on Channel {channel_num}")
+            self.gui.log_message(f"Target: {self.target_voltage}V @ {self.target_current}A")
+            
+            return True
+            
+        except Exception as e:
+            self.gui.log_message(f"Failed to start charging: {e}")
+            return False
+    
+    def stop_charging(self):
+        """Stop charging and safely discharge."""
+        if not self.charging:
+            return
+            
+        try:
+            # Select the charging channel
+            self.gui.psu.write(f"INSTrument:NSELect {self.charge_channel}")
+            
+            # Gradually reduce voltage to safe level
+            profile = BATTERY_TYPES[self.battery_type]
+            safe_voltage = profile["nominal_voltage"]
+            
+            # Set to nominal voltage first
+            self.gui.psu.write(f"VOLTage {safe_voltage:.3f}")
+            time.sleep(1)
+            
+            # Disable output
+            self.gui.psu.write("OUTPut OFF")
+            
+            # Update channel UI
+            channel = self.gui.channels[self.charge_channel - 1]
+            channel.output_enabled.set(False)
+            
+            self.charging = False
+            self.charge_start_time = None
+            
+            self.gui.log_message(f"Stopped charging {self.battery_type}")
+            
+        except Exception as e:
+            self.gui.log_message(f"Error stopping charge: {e}")
+    
+    def check_charge_complete(self):
+        """Check if charging should be completed based on current."""
+        if not self.charging or not self.gui.connected:
+            return False
+            
+        try:
+            # Select the charging channel
+            self.gui.psu.write(f"INSTrument:NSELect {self.charge_channel}")
+            
+            # Read current measurement
+            current = float(self.gui.psu.query("MEASure:CURRent?"))
+            
+            # Check if current has dropped below cutoff
+            if current <= self.cutoff_current:
+                self.gui.log_message(f"Charge complete - current dropped to {current:.3f}A")
+                self.stop_charging()
+                return True
+                
+            return False
+            
+        except Exception as e:
+            self.gui.log_message(f"Error checking charge status: {e}")
+            return False
+    
+    def get_charge_time(self):
+        """Get elapsed charging time in minutes."""
+        if not self.charging or not self.charge_start_time:
+            return 0
+        return (time.time() - self.charge_start_time) / 60.0
+
 class ChannelControl:
     """Control class for individual PSU channel."""
     
@@ -218,6 +374,9 @@ class OwonPSUGUI:
         for i in range(1, 4):  # Channels 1, 2, 3
             self.channels.append(ChannelControl(i, None, self))
         
+        # Battery charger
+        self.battery_charger = BatteryCharger(self)
+        
         # GUI variables
         self.setup_variables()
         
@@ -243,6 +402,12 @@ class OwonPSUGUI:
         self.device_status = tk.StringVar(value="Disconnected")
         self.current_channel = tk.IntVar(value=1)  # Currently selected channel
         
+        # Battery charging variables
+        self.battery_type = tk.StringVar(value="18650 Li-ion")
+        self.charge_channel = tk.IntVar(value=1)
+        self.charge_status = tk.StringVar(value="Not Charging")
+        self.charge_time = tk.StringVar(value="00:00")
+        
     def create_widgets(self):
         """Create all GUI widgets."""
         # Main container
@@ -256,6 +421,9 @@ class OwonPSUGUI:
         
         # Channel tabs
         self.create_channel_tabs(main_frame)
+        
+        # Battery charging panel
+        self.create_battery_panel(main_frame)
         
         # Log panel
         self.create_log_panel(main_frame)
@@ -384,11 +552,70 @@ class OwonPSUGUI:
         overview_frame.grid_rowconfigure(0, weight=1)
         overview_frame.grid_columnconfigure(0, weight=1)
         
+    def create_battery_panel(self, parent):
+        """Create battery charging panel."""
+        battery_frame = ttk.LabelFrame(parent, text="Battery Charging", padding="10")
+        battery_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        # Battery type selection
+        type_frame = ttk.Frame(battery_frame)
+        type_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Label(type_frame, text="Battery Type:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        self.battery_type_combo = ttk.Combobox(type_frame, textvariable=self.battery_type, 
+                                             values=list(BATTERY_TYPES.keys()), state="readonly", width=20)
+        self.battery_type_combo.grid(row=0, column=1, padx=(0, 20))
+        self.battery_type_combo.bind("<<ComboboxSelected>>", self.on_battery_type_change)
+        
+        ttk.Label(type_frame, text="Channel:").grid(row=0, column=2, sticky=tk.W, padx=(0, 10))
+        self.charge_channel_combo = ttk.Combobox(type_frame, textvariable=self.charge_channel,
+                                                values=[1, 2, 3], state="readonly", width=5)
+        self.charge_channel_combo.grid(row=0, column=3, padx=(0, 20))
+        
+        # Battery info display
+        info_frame = ttk.LabelFrame(battery_frame, text="Battery Information", padding="5")
+        info_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.battery_info_text = tk.Text(info_frame, height=3, width=60, wrap=tk.WORD)
+        self.battery_info_text.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        
+        # Charging controls
+        control_frame = ttk.Frame(battery_frame)
+        control_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.start_charge_btn = ttk.Button(control_frame, text="Start Charging", 
+                                          command=self.start_battery_charging, state="disabled")
+        self.start_charge_btn.grid(row=0, column=0, padx=(0, 10))
+        
+        self.stop_charge_btn = ttk.Button(control_frame, text="Stop Charging", 
+                                         command=self.stop_battery_charging, state="disabled")
+        self.stop_charge_btn.grid(row=0, column=1, padx=(0, 10))
+        
+        # Charging status
+        status_frame = ttk.Frame(battery_frame)
+        status_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        
+        ttk.Label(status_frame, text="Status:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        self.charge_status_label = ttk.Label(status_frame, textvariable=self.charge_status, 
+                                           foreground="red", font=("Arial", 10, "bold"))
+        self.charge_status_label.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        
+        ttk.Label(status_frame, text="Time:").grid(row=0, column=2, sticky=tk.W, padx=(0, 10))
+        self.charge_time_label = ttk.Label(status_frame, textvariable=self.charge_time, 
+                                         font=("Arial", 10, "bold"))
+        self.charge_time_label.grid(row=0, column=3, sticky=tk.W)
+        
+        # Configure grid weights
+        battery_frame.grid_columnconfigure(0, weight=1)
+        info_frame.grid_columnconfigure(0, weight=1)
+        
+        # Initialize battery info
+        self.update_battery_info()
         
     def create_log_panel(self, parent):
         """Create log display panel."""
         log_frame = ttk.LabelFrame(parent, text="Log", padding="10")
-        log_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        log_frame.grid(row=4, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         log_frame.grid_rowconfigure(0, weight=1)
         log_frame.grid_columnconfigure(0, weight=1)
         
@@ -455,6 +682,7 @@ class OwonPSUGUI:
             # Update UI
             self.connect_btn.config(state="disabled")
             self.disconnect_btn.config(state="normal")
+            self.start_charge_btn.config(state="normal")
             
             # Get device info
             identity = self.psu.get_identity()
@@ -496,6 +724,8 @@ class OwonPSUGUI:
             # Update UI
             self.connect_btn.config(state="normal")
             self.disconnect_btn.config(state="disabled")
+            self.start_charge_btn.config(state="disabled")
+            self.stop_charge_btn.config(state="disabled")
             
             # Clear all channel measurements
             for channel in self.channels:
@@ -721,6 +951,7 @@ class OwonPSUGUI:
                     # Update GUI in main thread
                     self.root.after(0, self.update_all_measurements, channel_statuses)
                     self.root.after(0, self.update_overview)
+                    self.root.after(0, self.update_charge_status)
                     
                 except Exception as e:
                     self.root.after(0, self.log_message, f"Monitoring error: {e}")
@@ -755,6 +986,89 @@ class OwonPSUGUI:
                 self.overview_tree.insert("", "end", values=(channel_num, voltage, current, power, output))
         except Exception as e:
             self.log_message(f"Failed to update overview: {e}")
+    
+    def on_battery_type_change(self, event=None):
+        """Handle battery type selection change."""
+        self.update_battery_info()
+    
+    def update_battery_info(self):
+        """Update battery information display."""
+        battery_type = self.battery_type.get()
+        if battery_type in BATTERY_TYPES:
+            profile = BATTERY_TYPES[battery_type]
+            info_text = f"{profile['description']}\n"
+            info_text += f"Max Voltage: {profile['max_voltage']}V\n"
+            info_text += f"Nominal Voltage: {profile['nominal_voltage']}V\n"
+            info_text += f"Charge Current: {profile['charge_current']}A\n"
+            info_text += f"Max Current: {profile['max_current']}A\n"
+            info_text += f"Cutoff Current: {profile['cutoff_current']}A"
+            
+            self.battery_info_text.delete(1.0, tk.END)
+            self.battery_info_text.insert(1.0, info_text)
+    
+    def start_battery_charging(self):
+        """Start battery charging."""
+        if not self.connected:
+            messagebox.showwarning("Not Connected", "Please connect to PSU first")
+            return
+            
+        battery_type = self.battery_type.get()
+        channel_num = self.charge_channel.get()
+        
+        if self.battery_charger.charging:
+            messagebox.showwarning("Already Charging", "A battery is already being charged")
+            return
+            
+        # Confirm charging parameters
+        profile = BATTERY_TYPES[battery_type]
+        msg = f"Start charging {battery_type} on Channel {channel_num}?\n\n"
+        msg += f"Target Voltage: {profile['max_voltage']}V\n"
+        msg += f"Charge Current: {profile['charge_current']}A\n"
+        msg += f"Cutoff Current: {profile['cutoff_current']}A"
+        
+        if messagebox.askyesno("Confirm Charging", msg):
+            if self.battery_charger.start_charging(battery_type, channel_num):
+                self.charge_status.set("Charging")
+                self.charge_status_label.config(foreground="green")
+                self.start_charge_btn.config(state="disabled")
+                self.stop_charge_btn.config(state="normal")
+                self.battery_type_combo.config(state="disabled")
+                self.charge_channel_combo.config(state="disabled")
+            else:
+                messagebox.showerror("Error", "Failed to start charging")
+    
+    def stop_battery_charging(self):
+        """Stop battery charging."""
+        if not self.battery_charger.charging:
+            return
+            
+        if messagebox.askyesno("Confirm Stop", "Stop charging and safely discharge?"):
+            self.battery_charger.stop_charging()
+            self.charge_status.set("Stopped")
+            self.charge_status_label.config(foreground="orange")
+            self.start_charge_btn.config(state="normal")
+            self.stop_charge_btn.config(state="disabled")
+            self.battery_type_combo.config(state="readonly")
+            self.charge_channel_combo.config(state="readonly")
+            self.charge_time.set("00:00")
+    
+    def update_charge_status(self):
+        """Update charging status and time."""
+        if self.battery_charger.charging:
+            # Check if charging is complete
+            if self.battery_charger.check_charge_complete():
+                self.charge_status.set("Complete")
+                self.charge_status_label.config(foreground="blue")
+                self.start_charge_btn.config(state="normal")
+                self.stop_charge_btn.config(state="disabled")
+                self.battery_type_combo.config(state="readonly")
+                self.charge_channel_combo.config(state="readonly")
+            else:
+                # Update charging time
+                charge_time_min = self.battery_charger.get_charge_time()
+                hours = int(charge_time_min // 60)
+                minutes = int(charge_time_min % 60)
+                self.charge_time.set(f"{hours:02d}:{minutes:02d}")
 
 def main():
     """Main function."""
